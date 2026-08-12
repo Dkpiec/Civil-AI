@@ -72,7 +72,7 @@ def ask_ai_to_parse_details(beam_clusters):
 
     try:
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-1.5-flash',
             contents=prompt,
             config={'response_mime_type': 'application/json'}
         )
@@ -101,10 +101,7 @@ if uploaded_files:
                 doc_frame = process_file_bytes(next(f for f in uploaded_files if f.name == framing_filename))
                 doc_detail = process_file_bytes(next(f for f in uploaded_files if f.name == detail_filename))
                 
-                # ==========================================
-                # PHASE 1: FRAMING PLAN (MASTER LIST)
-                # ==========================================
-                master_beams = {} # {beam_name: {'length': 0.0}}
+                master_beams = {} 
                 framing_nodes = []
                 
                 for text in doc_frame.modelspace().query('TEXT MTEXT'):
@@ -112,27 +109,23 @@ if uploaded_files:
                     found_beams = set(re.findall(BEAM_PATTERN, content))
                     for b in found_beams:
                         clean_b = b.replace(" ", "")
-                        master_beams[clean_b] = {'length': 0.0} # Initialize
+                        master_beams[clean_b] = {'length': 0.0}
                         try: pos = (text.dxf.insert.x, text.dxf.insert.y)
                         except AttributeError: pos = (text.dxf.align_point.x, text.dxf.align_point.y)
                         framing_nodes.append({'beam': clean_b, 'pos': pos})
 
-                # Wide Net Line Matching (Find lengths)
                 for entity in doc_frame.modelspace().query('LINE LWPOLYLINE'):
                     layer = entity.dxf.layer.upper()
                     if any(x in layer for x in ['GRID', 'DIM', 'TEXT', 'HATCH', 'DEFPOINTS']): continue
                         
                     length = calculate_length(entity)
-                    if length > 500: # Beams are rarely under 500mm
+                    if length > 500:
                         midpoint = get_midpoint(entity)
                         for fn in framing_nodes:
-                            if math.dist(midpoint, fn['pos']) < 4000: # 4m tolerance for messy CAD
+                            if math.dist(midpoint, fn['pos']) < 4000:
                                 if length > master_beams[fn['beam']]['length']:
                                     master_beams[fn['beam']]['length'] = length
 
-                # ==========================================
-                # PHASE 2: DETAIL PLAN (SPATIAL CLUSTERING)
-                # ==========================================
                 detail_texts = []
                 for text in doc_detail.modelspace().query('TEXT MTEXT'):
                     content = str(text.dxf.text if text.dxftype() == 'TEXT' else text.text).strip().upper()
@@ -147,23 +140,15 @@ if uploaded_files:
                         clean_b = b.replace(" ", "")
                         if clean_b not in beam_clusters:
                             beam_clusters[clean_b] = []
-                        # Gather all text within 15 meters of this beam title
                         for other_dt in detail_texts:
                             if math.dist(dt['pos'], other_dt['pos']) < 15000:
-                                if len(other_dt['content']) > 2: # Ignore single letters
+                                if len(other_dt['content']) > 2:
                                     beam_clusters[clean_b].append(other_dt['content'])
-                        # Remove duplicates from cluster
                         beam_clusters[clean_b] = list(set(beam_clusters[clean_b]))
 
-                # ==========================================
-                # PHASE 3: AI SEMANTIC PARSING
-                # ==========================================
-                # Batch request to Gemini (keeps API calls low)
                 ai_extracted_data = {}
                 if beam_clusters:
                     st.info(f"🧠 Sending {len(beam_clusters)} beam detail clusters to AI for reading...")
-                    
-                    # Split into chunks if there are hundreds of beams to avoid payload limits
                     chunk_size = 50
                     cluster_items = list(beam_clusters.items())
                     for i in range(0, len(cluster_items), chunk_size):
@@ -171,11 +156,8 @@ if uploaded_files:
                         parsed_chunk = ask_ai_to_parse_details(chunk)
                         ai_extracted_data.update(parsed_chunk)
 
-                # ==========================================
-                # PHASE 4: CALCULATION & REPORTING
-                # ==========================================
                 report_data = []
-                cover_mm = 30 # Standard beam cover
+                cover_mm = 30
                 
                 for beam, data in master_beams.items():
                     length_mm = data['length']
@@ -185,10 +167,8 @@ if uploaded_files:
                     width = ai_data.get('width', 0)
                     depth = ai_data.get('depth', 0)
                     
-                    # Concrete QTY
                     vol_m3 = round((width/1000.0) * (depth/1000.0) * length_m, 3) if width and depth else 0.0
                     
-                    # Main Bars
                     for mb in ai_data.get('main_bars', []):
                         if mb['count'] > 0 and mb['dia'] > 0:
                             cut_length_m = round(length_m + (2 * (9 * mb['dia'] / 1000.0)), 2)
@@ -199,15 +179,11 @@ if uploaded_files:
                                 'Cut Length (m)': cut_length_m,
                                 'Total Weight (kg)': round(((mb['dia']**2)/162) * (cut_length_m * mb['count']), 2)
                             })
-                            vol_m3 = "" # Blank out for subsequent rows of the same beam
+                            vol_m3 = ""
                             
-                    # Stirrups (Rings)
                     for stp in ai_data.get('stirrups', []):
                         if stp['dia'] > 0 and stp['spacing'] > 0 and width > 0 and depth > 0:
                             num_stirrups = int((length_mm / stp['spacing']) + 1) if length_mm > 0 else 0
-                            
-                            # Stirrup Cut Length = Perimeter of stirrup + 2 Hooks (10d)
-                            # Perimeter = 2 * ((Width - 2*Cover) + (Depth - 2*Cover))
                             a = width - (2 * cover_mm)
                             b = depth - (2 * cover_mm)
                             stirrup_cut_mm = (2 * (a + b)) + (24 * stp['dia'])
@@ -222,7 +198,6 @@ if uploaded_files:
                             })
                             vol_m3 = ""
                             
-                    # If beam was found but AI couldn't parse details
                     if not ai_data.get('main_bars') and not ai_data.get('stirrups'):
                         report_data.append({
                             'Beam': beam, 'Type': 'Missing Details', 'Dimension': f"{width}x{depth}" if width else "Unknown",
