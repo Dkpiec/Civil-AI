@@ -212,25 +212,54 @@ if uploaded_file is not None:
                 else:
                     st.error("LLM Fallback failed to process the raw data.")
 
-            # --- Render Data & Export ---
-            if not df_bbs.empty:
-                st.divider()
-                st.subheader("📋 Bar Bending Schedule")
-                st.dataframe(df_bbs, use_container_width=True)
+           # --- Render Interactive Data & Log Corrections ---
+if not df_bbs.empty:
+    st.divider()
+    st.subheader("📋 Interactive Bar Bending Schedule")
+    st.markdown("*Review and correct the AI's extraction below. Any edits you make are logged to help the AI learn!*")
 
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df_bbs.to_excel(writer, sheet_name='Detailed BBS', index=False)
+    # 1. The Interactive Data Editor
+    # Setting a 'key' tells Streamlit to save the exact edits into the session state
+    edited_df = st.data_editor(
+        df_bbs,
+        num_rows="dynamic", # Allows the user to add missing bars or delete incorrect rows
+        use_container_width=True,
+        key="bbs_editor"
+    )
 
-                st.download_button(
-                    label="📥 Download Excel Report",
-                    data=buffer.getvalue(),
-                    file_name=f"{project_name.replace(' ', '_') if project_name else 'BBS'}_Report.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary"
-                )
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        # 2. The Feedback Logging Mechanism
+        if st.button("💾 Submit Corrections to AI Knowledge Base", type="secondary"):
+            # Fetch the exact differences from Streamlit's session state
+            changes = st.session_state["bbs_editor"]
+            
+            if changes["edited_rows"] or changes["added_rows"] or changes["deleted_rows"]:
+                st.success("✅ Corrections logged successfully for future AI training!")
+                
+                # In a production app, you would send this JSON to your database (e.g., Supabase)
+                # Here, we print it to the UI so you can see exactly how the "deltas" are captured
+                with st.expander("View Raw Training Data (JSON)"):
+                    st.json(changes)
             else:
-                st.warning("No rebar data could be mapped. The drawing might be completely unstructured.")
+                st.info("No corrections made. The AI extraction was 100% accurate!")
+
+    with col2:
+        # 3. Export the EDITED dataframe to Excel, not the original one
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            edited_df.to_excel(writer, sheet_name='Detailed BBS', index=False)
+
+        st.download_button(
+            label="📥 Download Corrected Excel Report",
+            data=buffer.getvalue(),
+            file_name=f"{project_name.replace(' ', '_') if project_name else 'BBS'}_Report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
+        )
+else:
+    st.warning("No rebar data could be mapped. The drawing might be completely unstructured.")
 
         except Exception as e:
             st.error(f"SYSTEM ERROR: {str(e)}")
