@@ -3,3 +3,5 @@ ezdxf
 pandas
 openpyxl
 matplotlib
+requests
+google-genai
