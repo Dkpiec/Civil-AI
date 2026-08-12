@@ -151,44 +151,51 @@ if uploaded_file is not None:
 
             st.write(f"🔍 **AI Layer Inference Found Rebars On:** `{', '.join(inferred_rebar_layers) if inferred_rebar_layers else 'None'}`")
 
-            # --- 4. Geometry Math Engine ---
+           # --- 4. Geometry Math Engine ---
             bbs_data = []
             lines_summary = []
 
-            # ONLY scan geometry on layers we just inferred contain rebars
+            # Scan ALL geometry, because CAD lines and texts are usually on different layers
             for entity in msp.query('LINE LWPOLYLINE'):
                 layer = entity.dxf.layer.upper()
-                if layer in inferred_rebar_layers:
-                    length_mm = calculate_length(entity)
-                    if length_mm <= 100: continue
+                
+                # Skip common non-structural layers to save processing time
+                if any(x in layer for x in ['GRID', 'DIM', 'HATCH', 'DEFPOINTS', 'VIEWPORT']):
+                    continue
                     
-                    midpoint = get_midpoint(entity)
-                    lines_summary.append({'layer': layer, 'length_mm': round(length_mm, 2), 'midpoint': midpoint})
+                length_mm = calculate_length(entity)
+                if length_mm <= 100: continue
+                
+                midpoint = get_midpoint(entity)
+                lines_summary.append({'layer': layer, 'length_mm': round(length_mm, 2), 'midpoint': midpoint})
 
-                    # Distance Matching
-                    closest_rebar, min_d = None, float('inf')
-                    for rt in rebar_texts:
-                        d = math.dist(midpoint, rt['pos'])
-                        if d < min_d and d < 3000: # Threshold: Text must be within 3m of line
+                # Distance Matching: Find if this line is near any of our detected texts
+                closest_rebar, min_d = None, float('inf')
+                for rt in rebar_texts:
+                    d = math.dist(midpoint, rt['pos'])
+                    if d < 3000: # Threshold: Text must be within 3m of line
+                        if d < min_d:
                             min_d, closest_rebar = d, rt
-                    
-                    closest_member = "Unknown"
-                    min_md = float('inf')
-                    for mt in member_texts:
-                        d = math.dist(midpoint, mt['pos'])
-                        if d < min_md and d < 5000:
+                
+                closest_member = "Unknown"
+                min_md = float('inf')
+                for mt in member_texts:
+                    d = math.dist(midpoint, mt['pos'])
+                    if d < 5000:
+                        if d < min_md:
                             min_md, closest_member = d, mt['content']
 
-                    if closest_rebar:
-                        bbs_data.append({
-                            'Member / Beam': closest_member,
-                            'Bar Callout': closest_rebar['content'],
-                            'Diameter (mm)': closest_rebar['dia'],
-                            'No. of Bars': closest_rebar['count'],
-                            'Single Cut Length (mm)': round(length_mm, 2),
-                            'Total Length (m)': round((length_mm * closest_rebar['count'])/1000, 2),
-                            'Total Weight (kg)': round(((closest_rebar['dia']**2)/162) * ((length_mm * closest_rebar['count'])/1000), 2)
-                        })
+                # If we found a rebar text near this line, map it!
+                if closest_rebar:
+                    bbs_data.append({
+                        'Member / Beam': closest_member,
+                        'Bar Callout': closest_rebar['content'],
+                        'Diameter (mm)': closest_rebar['dia'],
+                        'No. of Bars': closest_rebar['count'],
+                        'Single Cut Length (mm)': round(length_mm, 2),
+                        'Total Length (m)': round((length_mm * closest_rebar['count'])/1000, 2),
+                        'Total Weight (kg)': round(((closest_rebar['dia']**2)/162) * ((length_mm * closest_rebar['count'])/1000), 2)
+                    })
 
             # --- 5. LLM Fallback Mechanism ---
             df_bbs = pd.DataFrame(bbs_data)
