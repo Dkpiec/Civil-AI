@@ -200,17 +200,18 @@ if uploaded_file is not None:
                         if d < min_md:
                             min_md, closest_member = d, mt['content']
 
-                # If we found a rebar text near this line, map it!
+              # If we found a rebar text near this line, map ALL bars inside it!
                 if closest_rebar:
-                    bbs_data.append({
-                        'Member / Beam': closest_member,
-                        'Bar Callout': closest_rebar['content'],
-                        'Diameter (mm)': closest_rebar['dia'],
-                        'No. of Bars': closest_rebar['count'],
-                        'Single Cut Length (mm)': round(length_mm, 2),
-                        'Total Length (m)': round((length_mm * closest_rebar['count'])/1000, 2),
-                        'Total Weight (kg)': round(((closest_rebar['dia']**2)/162) * ((length_mm * closest_rebar['count'])/1000), 2)
-                    })
+                    for bar in closest_rebar['bars']:
+                        bbs_data.append({
+                            'Member / Beam': closest_member,
+                            'Bar Callout': closest_rebar['content'],
+                            'Diameter (mm)': bar['dia'],
+                            'No. of Bars': bar['count'],
+                            'Single Cut Length (mm)': round(length_mm, 2),
+                            'Total Length (m)': round((length_mm * bar['count'])/1000, 2),
+                            'Total Weight (kg)': round(((bar['dia']**2)/162) * ((length_mm * bar['count'])/1000), 2)
+                        })
 
             # --- 5. LLM Fallback Mechanism ---
             df_bbs = pd.DataFrame(bbs_data)
