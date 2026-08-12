@@ -121,7 +121,7 @@ if uploaded_file is not None:
             doc = ezdxf.readfile("temp.dxf")
             msp = doc.modelspace()
 
-            # --- 2. Dynamic Text Recognition & 3. Layer Inference ---
+           # --- 2. Dynamic Text Recognition & 3. Layer Inference ---
             rebar_texts, member_texts, section_texts = [], [], []
             inferred_rebar_layers = set()
             
@@ -134,16 +134,31 @@ if uploaded_file is not None:
                     try: insert_pt = (text.dxf.align_point.x, text.dxf.align_point.y)
                     except AttributeError: continue
 
-                # Look for rebar patterns (e.g., 8-T16, 12#20, Y10)
-                rebar_match = re.search(r'(\d+)\s*[-#TXY]\s*(\d{2})', content)
+                # Extract MULTIPLE rebars from a single text like "2-T25+2-T20"
+                # (?<!\d) ensures we don't accidentally grab the end of a dimension
+                rebar_matches = list(re.finditer(r'(?<!\d)(\d{1,3})\s*[-#TXY]\s*(\d{2})(?!\d)', content))
                 section_match = re.search(r'\d+\s*[xX]\s*\d+', content)
 
-                if rebar_match:
-                    rebar_texts.append({
-                        'content': content, 'pos': insert_pt, 'layer': layer,
-                        'count': int(rebar_match.group(1)), 'dia': int(rebar_match.group(2))
-                    })
-                    inferred_rebar_layers.add(layer) # <--- Layer Inference
+                if rebar_matches:
+                    bars_in_text = []
+                    for match in rebar_matches:
+                        count = int(match.group(1))
+                        dia = int(match.group(2))
+                        
+                        # Sanity Check: Filter out false positives like 600 or 450 
+                        # which are actually dimensions mistakenly formatted like rebars.
+                        if count < 150: 
+                            bars_in_text.append({'count': count, 'dia': dia})
+                    
+                    if bars_in_text:
+                        rebar_texts.append({
+                            'content': content, 
+                            'pos': insert_pt, 
+                            'layer': layer,
+                            'bars': bars_in_text # Stores multiple bars (e.g., 2-T25 and 2-T20)
+                        })
+                        inferred_rebar_layers.add(layer) # <--- Layer Inference
+                        
                 elif section_match:
                     section_texts.append({'content': content, 'pos': insert_pt})
                 elif re.match(r'^[A-Z]{1,3}[-]?\d+$', content): # Looks like a beam name (B1, PB-2)
