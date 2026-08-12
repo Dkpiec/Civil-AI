@@ -2,22 +2,14 @@ import streamlit as st
 import ezdxf
 import pandas as pd
 import math
-import matplotlib.pyplot as plt
-import warnings
 import re
-import traceback
 import io
 import requests
 import os
-import json
-from google import genai
-
-warnings.filterwarnings('ignore')
+import traceback
 
 # --- API Keys ---
-# Set these in Streamlit Community Cloud (Settings > Secrets)
 CONVERT_API_SECRET = os.environ.get("CONVERT_API_SECRET", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # --- Helper Functions ---
 def get_midpoint(entity):
@@ -28,9 +20,7 @@ def get_midpoint(entity):
             pts = entity.get_points('xy')
             if not pts: return (0, 0)
             return pts[len(pts)//2]
-    except Exception:
-        pass
-    return (0, 0)
+    except Exception: return (0, 0)
 
 def calculate_length(entity):
     try:
@@ -40,245 +30,160 @@ def calculate_length(entity):
             pts = entity.get_points('xy')
             if len(pts) < 2: return 0.0
             length = sum(math.dist(pts[i], pts[i+1]) for i in range(len(pts)-1))
-            if entity.closed:
-                length += math.dist(pts[-1], pts[0])
+            if entity.closed: length += math.dist(pts[-1], pts[0])
             return length
-    except Exception:
-        return 0.0
-    return 0.0
+    except Exception: return 0.0
 
-def convert_dwg_to_dxf(file_bytes):
-    """Sends DWG to ConvertAPI and returns DXF bytes."""
-    if not CONVERT_API_SECRET:
-        st.error("ConvertAPI Secret Key is missing in secrets.")
-        return None
-        
-    url = f"https://v2.convertapi.com/convert/dwg/to/dxf?Secret={CONVERT_API_SECRET}"
-    files = {'file': ('uploaded.dwg', file_bytes)}
-    response = requests.post(url, files=files)
+def process_file_bytes(uploaded_file):
+    """Converts DWG to DXF if necessary and returns an ezdxf document."""
+    file_bytes = uploaded_file.getvalue()
+    file_ext = uploaded_file.name.split('.')[-1].lower()
     
-    if response.status_code == 200:
-        dxf_url = response.json()['Files'][0]['Url']
-        return requests.get(dxf_url).content
-    else:
-        st.error(f"DWG Conversion Failed: {response.text}")
-        return None
+    if file_ext == 'dwg':
+        if not CONVERT_API_SECRET:
+            st.error("ConvertAPI Secret missing. Cannot convert DWG.")
+            return None
+        url = f"https://v2.convertapi.com/convert/dwg/to/dxf?Secret={CONVERT_API_SECRET}"
+        files = {'file': (uploaded_file.name, file_bytes)}
+        res = requests.post(url, files=files)
+        if res.status_code == 200:
+            file_bytes = requests.get(res.json()['Files'][0]['Url']).content
+        else: return None
+        
+    temp_path = f"temp_{uploaded_file.name}.dxf"
+    with open(temp_path, "wb") as f: f.write(file_bytes)
+    return ezdxf.readfile(temp_path)
 
-def ask_llm_fallback(rebar_texts, lines_summary):
-    """LLM Integration: Uses human-like reasoning if standard math fails."""
-    if not GEMINI_API_KEY:
-        st.error("Gemini API Key missing. Cannot run AI fallback.")
-        return None
-        
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    prompt = f"""
-    You are a civil engineering AI. The standard geometric distance math failed to map these rebars.
-    Use logical reasoning to pair these unstructured rebar callouts with the provided drawn line lengths.
-    
-    Raw Texts: {rebar_texts[:30]}
-    Line Lengths (mm): {lines_summary[:30]}
-    
-    Return a JSON array of objects with keys exactly as: 
-    "Member", "Callout", "Diameter", "Count", "Length_mm". 
-    Do not include markdown blocks, just the raw JSON.
-    """
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config={'response_mime_type': 'application/json'}
-        )
-        return json.loads(response.text)
-    except Exception as e:
-        st.error(f"LLM Error: {e}")
-        return None
+# --- Robust Civil Engineering Regex ---
+# Catches B1, PB-2, RB 12, BEAM-5, B12A, FB1, GB2
+BEAM_REGEX = r'^(?:PB|B|RB|CB|TB|GB|FB|BEAM)\s*[-]?\s*\d+[A-Z]?$'
 
 # --- UI Setup ---
 st.set_page_config(page_title="Universal Civil AI", page_icon="🏗️", layout="wide")
+st.title("🏗️ Universal Civil AI: Multi-File Linked BBS")
 
-st.title("🏗️ Universal Civil AI: Auto-Detect & Convert")
-st.markdown("This tool utilizes **Dynamic Text Recognition**, **Layer Inference**, and an **LLM Fallback Engine** to process any DWG or DXF, regardless of the draftsman's layer naming conventions.")
+uploaded_files = st.file_uploader("Upload CAD Drawings (Select Multiple Files)", type=[".dxf", ".dwg"], accept_multiple_files=True)
 
-project_name = st.text_input("Project Name / Description", placeholder="e.g., 26x60 Plot Foundation Plan")
-uploaded_file = st.file_uploader("Upload CAD Drawing (.dxf or .dwg)", type=[".dxf", ".dwg"])
-
-if uploaded_file is not None:
-    file_ext = uploaded_file.name.split('.')[-1].lower()
+if uploaded_files:
+    st.divider()
+    st.subheader("1. Assign File Roles")
+    file_names = [f.name for f in uploaded_files]
     
-    with st.spinner("Analyzing CAD structure..."):
-        try:
-            # 1. Automatic Conversion
-            if file_ext == 'dwg':
-                st.info("DWG detected. Converting to DXF via Cloud API...")
-                dxf_bytes = convert_dwg_to_dxf(uploaded_file.getvalue())
-                if not dxf_bytes: st.stop()
-            else:
-                dxf_bytes = uploaded_file.getvalue()
+    col1, col2 = st.columns(2)
+    with col1:
+        framing_filename = st.selectbox("Which file is the Framing Plan? (For Beam Lengths)", ["None"] + file_names)
+    with col2:
+        detail_filename = st.selectbox("Which file is the Beam Details? (For Rebars)", ["None"] + file_names)
 
-            with open("temp.dxf", "wb") as f:
-                f.write(dxf_bytes)
-            
-            doc = ezdxf.readfile("temp.dxf")
-            msp = doc.modelspace()
-
-           # --- 2. Dynamic Text Recognition & 3. Layer Inference ---
-            rebar_texts, member_texts, section_texts = [], [], []
-            inferred_rebar_layers = set()
-            
-            for text in msp.query('TEXT MTEXT'):
-                content = str(text.dxf.text if text.dxftype() == 'TEXT' else text.text).strip().upper()
-                layer = text.dxf.layer.upper()
-                
-                try: insert_pt = (text.dxf.insert.x, text.dxf.insert.y)
-                except AttributeError:
-                    try: insert_pt = (text.dxf.align_point.x, text.dxf.align_point.y)
-                    except AttributeError: continue
-
-                # Extract MULTIPLE rebars from a single text like "2-T25+2-T20"
-                # (?<!\d) ensures we don't accidentally grab the end of a dimension
-                rebar_matches = list(re.finditer(r'(?<!\d)(\d{1,3})\s*[-#TXY]\s*(\d{2})(?!\d)', content))
-                section_match = re.search(r'\d+\s*[xX]\s*\d+', content)
-
-                if rebar_matches:
-                    bars_in_text = []
-                    for match in rebar_matches:
-                        count = int(match.group(1))
-                        dia = int(match.group(2))
-                        
-                        # Sanity Check: Filter out false positives like 600 or 450 
-                        # which are actually dimensions mistakenly formatted like rebars.
-                        if count < 150: 
-                            bars_in_text.append({'count': count, 'dia': dia})
+    if framing_filename != "None" and detail_filename != "None":
+        if st.button("🔍 Step 2: Scan Files for Beams", type="primary"):
+            with st.spinner("Extracting data from both files..."):
+                try:
+                    # Parse both files
+                    framing_file = next(f for f in uploaded_files if f.name == framing_filename)
+                    detail_file = next(f for f in uploaded_files if f.name == detail_filename)
                     
-                    if bars_in_text:
-                        rebar_texts.append({
-                            'content': content, 
-                            'pos': insert_pt, 
-                            'layer': layer,
-                            'bars': bars_in_text # Stores multiple bars (e.g., 2-T25 and 2-T20)
-                        })
-                        inferred_rebar_layers.add(layer) # <--- Layer Inference
-                        
-                elif section_match:
-                    section_texts.append({'content': content, 'pos': insert_pt})
-                elif re.match(r'^[A-Z]{1,3}[-]?\d+$', content): # Looks like a beam name (B1, PB-2)
-                    member_texts.append({'content': content, 'pos': insert_pt})
+                    doc_frame = process_file_bytes(framing_file)
+                    doc_detail = process_file_bytes(detail_file)
+                    
+                    # --- Extract Beam Lengths from Framing Plan ---
+                    beam_lengths = {}
+                    framing_texts = []
+                    
+                    for text in doc_frame.modelspace().query('TEXT MTEXT'):
+                        content = str(text.dxf.text if text.dxftype() == 'TEXT' else text.text).strip().upper()
+                        if re.match(BEAM_REGEX, content):
+                            try: pos = (text.dxf.insert.x, text.dxf.insert.y)
+                            except AttributeError: pos = (text.dxf.align_point.x, text.dxf.align_point.y)
+                            framing_texts.append({'beam': content, 'pos': pos})
+                            
+                    for entity in doc_frame.modelspace().query('LINE LWPOLYLINE'):
+                        length = calculate_length(entity)
+                        if length > 300: # Filter out tiny lines
+                            midpoint = get_midpoint(entity)
+                            for ft in framing_texts:
+                                # If line is close to beam text, assign its length to the beam
+                                if math.dist(midpoint, ft['pos']) < 2500: 
+                                    # Keep the longest line associated with this beam name
+                                    if ft['beam'] not in beam_lengths or length > beam_lengths[ft['beam']]:
+                                        beam_lengths[ft['beam']] = length
 
-            st.write(f"🔍 **AI Layer Inference Found Rebars On:** `{', '.join(inferred_rebar_layers) if inferred_rebar_layers else 'None'}`")
+                    # --- Extract Rebars from Details Plan ---
+                    beam_rebars = {}
+                    detail_texts = []
+                    
+                    for text in doc_detail.modelspace().query('TEXT MTEXT'):
+                        content = str(text.dxf.text if text.dxftype() == 'TEXT' else text.text).strip().upper()
+                        try: pos = (text.dxf.insert.x, text.dxf.insert.y)
+                        except AttributeError: pos = (text.dxf.align_point.x, text.dxf.align_point.y)
+                        detail_texts.append({'content': content, 'pos': pos})
+                    
+                    # Map rebars to beams based on proximity in the detail drawing
+                    for dt in detail_texts:
+                        if re.match(BEAM_REGEX, dt['content']):
+                            beam_name = dt['content']
+                            beam_rebars[beam_name] = []
+                            
+                            # Find all rebar callouts near this beam name
+                            for other_text in detail_texts:
+                                if math.dist(dt['pos'], other_text['pos']) < 6000: # Search radius for rebars
+                                    rebar_matches = list(re.finditer(r'(?<!\d)(\d{1,3})\s*[-#TXY]\s*(\d{2})(?!\d)', other_text['content']))
+                                    for match in rebar_matches:
+                                        if int(match.group(1)) < 150: # Ignore false dimensions
+                                            beam_rebars[beam_name].append({
+                                                'callout': other_text['content'],
+                                                'count': int(match.group(1)),
+                                                'dia': int(match.group(2))
+                                            })
 
-           # --- 4. Geometry Math Engine ---
+                    # Save to session state for the UI
+                    all_detected_beams = list(set(list(beam_lengths.keys()) + list(beam_rebars.keys())))
+                    st.session_state["all_beams"] = sorted(all_detected_beams)
+                    st.session_state["beam_lengths"] = beam_lengths
+                    st.session_state["beam_rebars"] = beam_rebars
+                    
+                except Exception as e:
+                    st.error(f"Error processing files: {e}")
+                    st.code(traceback.format_exc())
+
+    # --- Step 3: UI for Beam Selection and Output ---
+    if "all_beams" in st.session_state:
+        st.divider()
+        st.subheader("3. Select Beams to Process")
+        st.markdown(f"**{len(st.session_state['all_beams'])} unique beams detected across both files.**")
+        
+        selected_beams = st.multiselect("Review and select beams for the Excel report:", 
+                                        options=st.session_state["all_beams"], 
+                                        default=st.session_state["all_beams"])
+
+        if st.button("✅ Step 4: Generate Linked BBS Report", type="primary"):
             bbs_data = []
-            lines_summary = []
-
-            # Scan ALL geometry, because CAD lines and texts are usually on different layers
-            for entity in msp.query('LINE LWPOLYLINE'):
-                layer = entity.dxf.layer.upper()
+            
+            for beam in selected_beams:
+                length_mm = st.session_state["beam_lengths"].get(beam, 0.0) # Default to 0 if missing in framing
+                rebars = st.session_state["beam_rebars"].get(beam, [])
                 
-                # Skip common non-structural layers to save processing time
-                if any(x in layer for x in ['GRID', 'DIM', 'HATCH', 'DEFPOINTS', 'VIEWPORT']):
-                    continue
-                    
-                length_mm = calculate_length(entity)
-                if length_mm <= 100: continue
-                
-                midpoint = get_midpoint(entity)
-                lines_summary.append({'layer': layer, 'length_mm': round(length_mm, 2), 'midpoint': midpoint})
-
-                # Distance Matching: Find if this line is near any of our detected texts
-                closest_rebar, min_d = None, float('inf')
-                for rt in rebar_texts:
-                    d = math.dist(midpoint, rt['pos'])
-                    if d < 3000: # Threshold: Text must be within 3m of line
-                        if d < min_d:
-                            min_d, closest_rebar = d, rt
-                
-                closest_member = "Unknown"
-                min_md = float('inf')
-                for mt in member_texts:
-                    d = math.dist(midpoint, mt['pos'])
-                    if d < 5000:
-                        if d < min_md:
-                            min_md, closest_member = d, mt['content']
-
-              # If we found a rebar text near this line, map ALL bars inside it!
-                if closest_rebar:
-                    for bar in closest_rebar['bars']:
-                        bbs_data.append({
-                            'Member / Beam': closest_member,
-                            'Bar Callout': closest_rebar['content'],
-                            'Diameter (mm)': bar['dia'],
-                            'No. of Bars': bar['count'],
-                            'Single Cut Length (mm)': round(length_mm, 2),
-                            'Total Length (m)': round((length_mm * bar['count'])/1000, 2),
-                            'Total Weight (kg)': round(((bar['dia']**2)/162) * ((length_mm * bar['count'])/1000), 2)
-                        })
-
-            # --- 5. LLM Fallback Mechanism ---
+                for bar in rebars:
+                    bbs_data.append({
+                        'Member / Beam': beam,
+                        'Bar Callout': bar['callout'],
+                        'Diameter (mm)': bar['dia'],
+                        'No. of Bars': bar['count'],
+                        'Single Cut Length (mm) [From Framing]': round(length_mm, 2),
+                        'Total Length (m)': round((length_mm * bar['count']) / 1000, 2),
+                        'Total Weight (kg)': round(((bar['dia']**2)/162) * ((length_mm * bar['count'])/1000), 2)
+                    })
+            
             df_bbs = pd.DataFrame(bbs_data)
             
-            if df_bbs.empty and len(rebar_texts) > 0:
-                st.warning("⚠️ Geometric math failed to map text to lines. Engaging Gemini AI Fallback...")
-                
-                llm_json = ask_llm_fallback(
-                    [r['content'] for r in rebar_texts], 
-                    [l['length_mm'] for l in lines_summary]
-                )
-                
-                if llm_json:
-                    st.success("🤖 LLM successfully recovered data using logic!")
-                    df_bbs = pd.DataFrame(llm_json)
-                    
-                    # Compute weights for LLM data
-                    if not df_bbs.empty and 'Diameter' in df_bbs.columns and 'Length_mm' in df_bbs.columns:
-                        df_bbs['Total Length (m)'] = (df_bbs['Length_mm'] * df_bbs['Count']) / 1000
-                        df_bbs['Total Weight (kg)'] = ((df_bbs['Diameter']**2)/162) * df_bbs['Total Length (m)']
-                else:
-                    st.error("LLM Fallback failed to process the raw data.")
-
-            # --- Render Interactive Data & Log Corrections ---
             if not df_bbs.empty:
-                st.divider()
-                st.subheader("📋 Interactive Bar Bending Schedule")
-                st.markdown("*Review and correct the AI's extraction below. Any edits you make are logged to help the AI learn!*")
-
-                # 1. The Interactive Data Editor
-                edited_df = st.data_editor(
-                    df_bbs,
-                    num_rows="dynamic", 
-                    use_container_width=True,
-                    key="bbs_editor"
-                )
-
-                col1, col2 = st.columns([1, 1])
-
-                with col1:
-                    # 2. The Feedback Logging Mechanism
-                    if st.button("💾 Submit Corrections to AI Knowledge Base", type="secondary"):
-                        changes = st.session_state["bbs_editor"]
-                        
-                        if changes["edited_rows"] or changes["added_rows"] or changes["deleted_rows"]:
-                            st.success("✅ Corrections logged successfully for future AI training!")
-                            with st.expander("View Raw Training Data (JSON)"):
-                                st.json(changes)
-                        else:
-                            st.info("No corrections made. The AI extraction was 100% accurate!")
-
-                with col2:
-                    # 3. Export the EDITED dataframe to Excel
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        edited_df.to_excel(writer, sheet_name='Detailed BBS', index=False)
-
-                    st.download_button(
-                        label="📥 Download Corrected Excel Report",
-                        data=buffer.getvalue(),
-                        file_name=f"{project_name.replace(' ', '_') if project_name else 'BBS'}_Report.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="primary"
-                    )
+                st.success("Report generated successfully!")
+                st.dataframe(df_bbs, use_container_width=True)
+                
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    df_bbs.to_excel(writer, sheet_name='Linked BBS', index=False)
+                
+                st.download_button("📥 Download Linked Excel Report", data=buffer.getvalue(), file_name="Linked_BBS_Report.xlsx")
             else:
-                st.warning("No rebar data could be mapped. The drawing might be completely unstructured.")
-
-        except Exception as e:
-            st.error(f"SYSTEM ERROR: {str(e)}")
-            st.code(traceback.format_exc())
+                st.warning("No linked data could be generated for the selected beams.")
