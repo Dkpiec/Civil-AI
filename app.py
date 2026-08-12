@@ -1,5 +1,6 @@
 import streamlit as st
 import ezdxf
+from ezdxf.path import make_path
 import pandas as pd
 import re
 import io
@@ -19,7 +20,6 @@ if uploaded_file is not None:
     with st.spinner("Analyzing CAD geometries and extracting text..."):
         # 1. Read the DXF directly from the uploaded byte stream
         try:
-            # We save it temporarily to read with ezdxf
             with open("temp.dxf", "wb") as f:
                 f.write(uploaded_file.getbuffer())
             doc = ezdxf.readfile("temp.dxf")
@@ -34,17 +34,31 @@ if uploaded_file is not None:
         # 2. Extract Geometry and Text
         for entity in msp.query('TEXT MTEXT'):
             text = entity.dxf.text.strip().upper() if hasattr(entity.dxf, 'text') else entity.text.strip().upper()
-            if text: rebar_texts.append({"raw_text": text, "layer": entity.dxf.layer})
+            if text: 
+                rebar_texts.append({"raw_text": text, "layer": entity.dxf.layer})
                 
         for polyline in msp.query('LWPOLYLINE'):
             if polyline.is_closed:
+                # Safely calculate perimeter using ezdxf.path instead of line.length
+                try:
+                    p = make_path(polyline)
+                    perimeter_m = p.length() / 1000.0
+                except Exception:
+                    perimeter_m = 0.0
+                    
+                # Safely calculate area
+                try:
+                    area_sqm = polyline.area / 1000000.0
+                except Exception:
+                    area_sqm = 0.0
+                    
                 shapes.append({
                     "layer": polyline.dxf.layer,
-                    "perimeter_m": sum(line.length for line in polyline.virtual_entities()) / 1000.0,
-                    "area_sqm": polyline.area / 1000000.0
+                    "perimeter_m": perimeter_m,
+                    "area_sqm": area_sqm
                 })
                 
-        # 3. Parse Rebar Data (Regex pattern for 8-T16, 12#16)
+        # 3. Parse Rebar Data
         parsed_rebars = []
         for item in rebar_texts:
             match = re.search(r'(\d+)\s*[-#T]\s*(\d{2})', item["raw_text"])
